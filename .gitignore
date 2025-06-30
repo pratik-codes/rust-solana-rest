@@ -1,0 +1,88 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Solana
+test-ledger/
+.anchor/
+keypairs/
+*.json
+!Cargo.toml
+
+# Build artifacts
+dist/
+build/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Editor backups
+*~
+*.bak
+*.orig
+
+# Node.js (if using any JS tooling)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Coverage reports
+coverage/
+*.profraw
+
+# Documentation build
+book/
+
+# RLS
+**/*.rs.bk
+
+# IDE-specific files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# macOS
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~ 
