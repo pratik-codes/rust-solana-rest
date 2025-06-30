@@ -25,6 +25,7 @@ use crate::models::{
 };
 use crate::services::solana::SolanaService;
 use crate::errors::{AppError, Result};
+use crate::validation;
 
 /// Custom JSON extractor that handles deserialization errors properly
 pub struct JsonExtractor<T>(pub T);
@@ -43,14 +44,18 @@ where
             Err(rejection) => {
                 let error_message = match rejection {
                     JsonRejection::JsonDataError(err) => {
-                        if err.to_string().contains("missing field") {
+                        let err_str = err.to_string();
+                        if err_str.contains("missing field") || 
+                           err_str.contains("missing field `") ||
+                           err_str.contains("expected value") ||
+                           err_str.contains("Failed to deserialize") {
                             "Missing required fields".to_string()
                         } else {
-                            format!("Invalid JSON: {}", err)
+                            "Invalid JSON data".to_string()
                         }
                     }
-                    JsonRejection::JsonSyntaxError(err) => {
-                        format!("Invalid JSON syntax: {}", err)
+                    JsonRejection::JsonSyntaxError(_) => {
+                        "Invalid JSON syntax".to_string()
                     }
                     JsonRejection::MissingJsonContentType(_) => {
                         "Missing Content-Type: application/json header".to_string()
@@ -89,28 +94,17 @@ pub async fn create_token_handler(
 ) -> Result<Json<ApiResponse<TokenInstructionResponse>>> {
     info!("Handling token creation request for mint: {}", request.mint);
 
-    // Validate request
-    if request.mint_authority.is_empty() {
-        return Err(AppError::ValidationError("mintAuthority is required".to_string()));
-    }
-    if request.mint.is_empty() {
-        return Err(AppError::ValidationError("mint is required".to_string()));
-    }
+    // Comprehensive validation using validation module
+    let mint_authority = validation::validate_pubkey(&request.mint_authority, "mintAuthority")?;
+    let mint = validation::validate_pubkey(&request.mint, "mint")?;
+    let decimals = validation::validate_decimals(request.decimals)?;
 
     let solana_service = SolanaService::new();
 
-    // Validate public keys
-    if !solana_service.is_valid_pubkey(&request.mint_authority) {
-        return Err(AppError::InvalidPublicKey(format!("Invalid mintAuthority: {}", request.mint_authority)));
-    }
-    if !solana_service.is_valid_pubkey(&request.mint) {
-        return Err(AppError::InvalidPublicKey(format!("Invalid mint: {}", request.mint)));
-    }
-
     match solana_service.create_token_mint(
-        &request.mint_authority,
-        &request.mint,
-        request.decimals,
+        &mint_authority.to_string(),
+        &mint.to_string(),
+        decimals,
     ) {
         Ok(token_response) => {
             info!("Successfully created token mint instruction for mint: {}", request.mint);
@@ -130,38 +124,19 @@ pub async fn mint_token_handler(
 ) -> Result<Json<ApiResponse<TokenInstructionResponse>>> {
     info!("Handling token minting request for mint: {}", request.mint);
 
-    // Validate request
-    if request.mint.is_empty() {
-        return Err(AppError::ValidationError("mint is required".to_string()));
-    }
-    if request.destination.is_empty() {
-        return Err(AppError::ValidationError("destination is required".to_string()));
-    }
-    if request.authority.is_empty() {
-        return Err(AppError::ValidationError("authority is required".to_string()));
-    }
-    if request.amount == 0 {
-        return Err(AppError::ValidationError("amount must be greater than 0".to_string()));
-    }
+    // Comprehensive validation using validation module
+    let mint = validation::validate_pubkey(&request.mint, "mint")?;
+    let destination = validation::validate_pubkey(&request.destination, "destination")?;
+    let authority = validation::validate_pubkey(&request.authority, "authority")?;
+    let amount = validation::validate_positive_amount(request.amount, "amount")?;
 
     let solana_service = SolanaService::new();
 
-    // Validate public keys
-    if !solana_service.is_valid_pubkey(&request.mint) {
-        return Err(AppError::InvalidPublicKey(format!("Invalid mint: {}", request.mint)));
-    }
-    if !solana_service.is_valid_pubkey(&request.destination) {
-        return Err(AppError::InvalidPublicKey(format!("Invalid destination: {}", request.destination)));
-    }
-    if !solana_service.is_valid_pubkey(&request.authority) {
-        return Err(AppError::InvalidPublicKey(format!("Invalid authority: {}", request.authority)));
-    }
-
     match solana_service.mint_token(
-        &request.mint,
-        &request.destination,
-        &request.authority,
-        request.amount,
+        &mint.to_string(),
+        &destination.to_string(),
+        &authority.to_string(),
+        amount,
     ) {
         Ok(token_response) => {
             info!("Successfully created token mint_to instruction for mint: {}", request.mint);
@@ -181,20 +156,11 @@ pub async fn sign_message_handler(
 ) -> Result<Json<ApiResponse<SignMessageResponse>>> {
     info!("Handling message signing request");
 
-    // Validate request
-    if request.message.is_empty() {
-        return Err(AppError::ValidationError("message is required".to_string()));
-    }
-    if request.secret.is_empty() {
-        return Err(AppError::ValidationError("secret is required".to_string()));
-    }
+    // Comprehensive validation using validation module
+    validation::validate_non_empty_string(&request.message, "message")?;
+    validation::validate_secret_key(&request.secret)?;
 
     let solana_service = SolanaService::new();
-
-    // Validate secret key format
-    if !solana_service.is_valid_secret_key(&request.secret) {
-        return Err(AppError::InvalidSecretKey("Invalid secret key format".to_string()));
-    }
 
     match solana_service.sign_message(&request.message, &request.secret) {
         Ok(sign_response) => {
@@ -215,28 +181,17 @@ pub async fn verify_message_handler(
 ) -> Result<Json<ApiResponse<VerifyMessageResponse>>> {
     info!("Handling message verification request");
 
-    // Validate request
-    if request.message.is_empty() {
-        return Err(AppError::ValidationError("message is required".to_string()));
-    }
-    if request.signature.is_empty() {
-        return Err(AppError::ValidationError("signature is required".to_string()));
-    }
-    if request.pubkey.is_empty() {
-        return Err(AppError::ValidationError("pubkey is required".to_string()));
-    }
+    // Comprehensive validation using validation module
+    validation::validate_non_empty_string(&request.message, "message")?;
+    let _signature_bytes = validation::validate_signature_format(&request.signature)?;
+    let pubkey = validation::validate_pubkey(&request.pubkey, "pubkey")?;
 
     let solana_service = SolanaService::new();
-
-    // Validate public key format
-    if !solana_service.is_valid_pubkey(&request.pubkey) {
-        return Err(AppError::InvalidPublicKey(format!("Invalid pubkey: {}", request.pubkey)));
-    }
 
     match solana_service.verify_message(
         &request.message,
         &request.signature,
-        &request.pubkey,
+        &pubkey.to_string(),
     ) {
         Ok(verify_response) => {
             info!("Successfully verified message signature: {}", verify_response.valid);
@@ -256,28 +211,14 @@ pub async fn send_sol_handler(
 ) -> Result<Json<ApiResponse<SendSolResponse>>> {
     info!("Handling SOL transfer request from {} to {}", request.from, request.to);
 
-    // Validate request
-    if request.from.is_empty() {
-        return Err(AppError::ValidationError("from is required".to_string()));
-    }
-    if request.to.is_empty() {
-        return Err(AppError::ValidationError("to is required".to_string()));
-    }
-    if request.lamports == 0 {
-        return Err(AppError::ValidationError("lamports must be greater than 0".to_string()));
-    }
+    // Comprehensive validation using validation module
+    let from = validation::validate_pubkey(&request.from, "from")?;
+    let to = validation::validate_pubkey(&request.to, "to")?;
+    let lamports = validation::validate_positive_amount(request.lamports, "lamports")?;
 
     let solana_service = SolanaService::new();
 
-    // Validate public keys
-    if !solana_service.is_valid_pubkey(&request.from) {
-        return Err(AppError::InvalidPublicKey(format!("Invalid from address: {}", request.from)));
-    }
-    if !solana_service.is_valid_pubkey(&request.to) {
-        return Err(AppError::InvalidPublicKey(format!("Invalid to address: {}", request.to)));
-    }
-
-    match solana_service.send_sol(&request.from, &request.to, request.lamports) {
+    match solana_service.send_sol(&from.to_string(), &to.to_string(), lamports) {
         Ok(sol_response) => {
             info!("Successfully created SOL transfer instruction");
             Ok(Json(ApiResponse::success(sol_response)))
@@ -296,38 +237,19 @@ pub async fn send_token_handler(
 ) -> Result<Json<ApiResponse<SendTokenResponse>>> {
     info!("Handling token transfer request for mint: {}", request.mint);
 
-    // Validate request
-    if request.destination.is_empty() {
-        return Err(AppError::ValidationError("destination is required".to_string()));
-    }
-    if request.mint.is_empty() {
-        return Err(AppError::ValidationError("mint is required".to_string()));
-    }
-    if request.owner.is_empty() {
-        return Err(AppError::ValidationError("owner is required".to_string()));
-    }
-    if request.amount == 0 {
-        return Err(AppError::ValidationError("amount must be greater than 0".to_string()));
-    }
+    // Comprehensive validation using validation module
+    let destination = validation::validate_pubkey(&request.destination, "destination")?;
+    let mint = validation::validate_pubkey(&request.mint, "mint")?;
+    let owner = validation::validate_pubkey(&request.owner, "owner")?;
+    let amount = validation::validate_positive_amount(request.amount, "amount")?;
 
     let solana_service = SolanaService::new();
 
-    // Validate public keys
-    if !solana_service.is_valid_pubkey(&request.destination) {
-        return Err(AppError::InvalidPublicKey(format!("Invalid destination: {}", request.destination)));
-    }
-    if !solana_service.is_valid_pubkey(&request.mint) {
-        return Err(AppError::InvalidPublicKey(format!("Invalid mint: {}", request.mint)));
-    }
-    if !solana_service.is_valid_pubkey(&request.owner) {
-        return Err(AppError::InvalidPublicKey(format!("Invalid owner: {}", request.owner)));
-    }
-
     match solana_service.send_token(
-        &request.destination,
-        &request.mint,
-        &request.owner,
-        request.amount,
+        &destination.to_string(),
+        &mint.to_string(),
+        &owner.to_string(),
+        amount,
     ) {
         Ok(token_response) => {
             info!("Successfully created token transfer instruction");

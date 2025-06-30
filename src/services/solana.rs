@@ -23,7 +23,7 @@ use crate::models::{
     SendTokenResponse,
     SendTokenAccountMeta,
 };
-use crate::errors::{AppError, Result, base58_decode_error, base64_decode_error};
+use crate::errors::{AppError, Result, base58_decode_error};
 
 /// Solana service for interacting with the Solana blockchain
 pub struct SolanaService;
@@ -143,11 +143,16 @@ impl SolanaService {
         // Decode signature from base64
         let signature_bytes = general_purpose::STANDARD
             .decode(signature_base64)
-            .map_err(base64_decode_error)?;
+            .map_err(|_| AppError::InvalidSignature("Invalid signature format".to_string()))?;
+
+        // Check if signature has the correct length (64 bytes for ed25519)
+        if signature_bytes.len() != 64 {
+            return Err(AppError::InvalidSignature("Invalid signature length".to_string()));
+        }
 
         // Parse public key
         let pubkey_parsed = Pubkey::from_str(pubkey)
-            .map_err(|_| AppError::InvalidPublicKey(pubkey.to_string()))?;
+            .map_err(|_| AppError::InvalidPublicKey(format!("Invalid pubkey: {}", pubkey)))?;
 
         // Create signature from bytes
         let signature = Signature::try_from(signature_bytes.as_slice())

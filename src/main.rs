@@ -8,6 +8,7 @@ mod handlers;
 mod services;
 mod models;
 mod errors;
+mod validation;
 
 use router::create_router;
 
