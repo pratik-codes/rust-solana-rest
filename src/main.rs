@@ -43,6 +43,8 @@ async fn main() {
     info!("  POST /token/mint      - Create SPL token mint_to instruction");
     info!("  POST /message/sign    - Sign message with secret key");
     info!("  POST /message/verify  - Verify message signature");
+    info!("  POST /send/sol        - Create SOL transfer instruction");
+    info!("  POST /send/token      - Create SPL token transfer instruction");
 
     // Start serving the application
     axum::serve(listener, app)

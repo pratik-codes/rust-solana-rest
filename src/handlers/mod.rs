@@ -1,8 +1,12 @@
 use axum::{
-    extract::Json as ExtractJson,
+    extract::{Json as ExtractJson, rejection::JsonRejection},
     response::Json,
+    async_trait,
+    extract::FromRequest,
+    http::Request,
 };
 use tracing::{info, error};
+use serde::de::DeserializeOwned;
 
 use crate::models::{
     ApiResponse, 
@@ -14,9 +18,50 @@ use crate::models::{
     SignMessageResponse,
     VerifyMessageRequest,
     VerifyMessageResponse,
+    SendSolRequest,
+    SendSolResponse,
+    SendTokenRequest,
+    SendTokenResponse,
 };
 use crate::services::solana::SolanaService;
 use crate::errors::{AppError, Result};
+
+/// Custom JSON extractor that handles deserialization errors properly
+pub struct JsonExtractor<T>(pub T);
+
+#[async_trait]
+impl<T, S> FromRequest<S> for JsonExtractor<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request(req: Request<axum::body::Body>, state: &S) -> Result<Self> {
+        match ExtractJson::<T>::from_request(req, state).await {
+            Ok(json) => Ok(JsonExtractor(json.0)),
+            Err(rejection) => {
+                let error_message = match rejection {
+                    JsonRejection::JsonDataError(err) => {
+                        if err.to_string().contains("missing field") {
+                            "Missing required fields".to_string()
+                        } else {
+                            format!("Invalid JSON: {}", err)
+                        }
+                    }
+                    JsonRejection::JsonSyntaxError(err) => {
+                        format!("Invalid JSON syntax: {}", err)
+                    }
+                    JsonRejection::MissingJsonContentType(_) => {
+                        "Missing Content-Type: application/json header".to_string()
+                    }
+                    _ => "Invalid request body".to_string(),
+                };
+                Err(AppError::ValidationError(error_message))
+            }
+        }
+    }
+}
 
 /// Handler for POST /keypair
 /// Generates a new Solana keypair
@@ -40,7 +85,7 @@ pub async fn generate_keypair_handler() -> Result<Json<ApiResponse<KeypairRespon
 /// Handler for POST /token/create
 /// Creates an SPL token mint instruction
 pub async fn create_token_handler(
-    ExtractJson(request): ExtractJson<CreateTokenRequest>,
+    JsonExtractor(request): JsonExtractor<CreateTokenRequest>,
 ) -> Result<Json<ApiResponse<TokenInstructionResponse>>> {
     info!("Handling token creation request for mint: {}", request.mint);
 
@@ -81,7 +126,7 @@ pub async fn create_token_handler(
 /// Handler for POST /token/mint
 /// Creates an SPL token mint_to instruction
 pub async fn mint_token_handler(
-    ExtractJson(request): ExtractJson<MintTokenRequest>,
+    JsonExtractor(request): JsonExtractor<MintTokenRequest>,
 ) -> Result<Json<ApiResponse<TokenInstructionResponse>>> {
     info!("Handling token minting request for mint: {}", request.mint);
 
@@ -132,7 +177,7 @@ pub async fn mint_token_handler(
 /// Handler for POST /message/sign
 /// Signs a message with the provided secret key
 pub async fn sign_message_handler(
-    ExtractJson(request): ExtractJson<SignMessageRequest>,
+    JsonExtractor(request): JsonExtractor<SignMessageRequest>,
 ) -> Result<Json<ApiResponse<SignMessageResponse>>> {
     info!("Handling message signing request");
 
@@ -166,7 +211,7 @@ pub async fn sign_message_handler(
 /// Handler for POST /message/verify
 /// Verifies a message signature
 pub async fn verify_message_handler(
-    ExtractJson(request): ExtractJson<VerifyMessageRequest>,
+    JsonExtractor(request): JsonExtractor<VerifyMessageRequest>,
 ) -> Result<Json<ApiResponse<VerifyMessageResponse>>> {
     info!("Handling message verification request");
 
@@ -177,21 +222,21 @@ pub async fn verify_message_handler(
     if request.signature.is_empty() {
         return Err(AppError::ValidationError("signature is required".to_string()));
     }
-    if request.public_key.is_empty() {
-        return Err(AppError::ValidationError("public_key is required".to_string()));
+    if request.pubkey.is_empty() {
+        return Err(AppError::ValidationError("pubkey is required".to_string()));
     }
 
     let solana_service = SolanaService::new();
 
     // Validate public key format
-    if !solana_service.is_valid_pubkey(&request.public_key) {
-        return Err(AppError::InvalidPublicKey(format!("Invalid public_key: {}", request.public_key)));
+    if !solana_service.is_valid_pubkey(&request.pubkey) {
+        return Err(AppError::InvalidPublicKey(format!("Invalid pubkey: {}", request.pubkey)));
     }
 
     match solana_service.verify_message(
         &request.message,
         &request.signature,
-        &request.public_key,
+        &request.pubkey,
     ) {
         Ok(verify_response) => {
             info!("Successfully verified message signature: {}", verify_response.valid);
@@ -204,10 +249,101 @@ pub async fn verify_message_handler(
     }
 }
 
+/// Handler for POST /send/sol
+/// Creates a SOL transfer instruction
+pub async fn send_sol_handler(
+    JsonExtractor(request): JsonExtractor<SendSolRequest>,
+) -> Result<Json<ApiResponse<SendSolResponse>>> {
+    info!("Handling SOL transfer request from {} to {}", request.from, request.to);
+
+    // Validate request
+    if request.from.is_empty() {
+        return Err(AppError::ValidationError("from is required".to_string()));
+    }
+    if request.to.is_empty() {
+        return Err(AppError::ValidationError("to is required".to_string()));
+    }
+    if request.lamports == 0 {
+        return Err(AppError::ValidationError("lamports must be greater than 0".to_string()));
+    }
+
+    let solana_service = SolanaService::new();
+
+    // Validate public keys
+    if !solana_service.is_valid_pubkey(&request.from) {
+        return Err(AppError::InvalidPublicKey(format!("Invalid from address: {}", request.from)));
+    }
+    if !solana_service.is_valid_pubkey(&request.to) {
+        return Err(AppError::InvalidPublicKey(format!("Invalid to address: {}", request.to)));
+    }
+
+    match solana_service.send_sol(&request.from, &request.to, request.lamports) {
+        Ok(sol_response) => {
+            info!("Successfully created SOL transfer instruction");
+            Ok(Json(ApiResponse::success(sol_response)))
+        }
+        Err(e) => {
+            error!("Failed to create SOL transfer instruction: {}", e);
+            Err(e)
+        }
+    }
+}
+
+/// Handler for POST /send/token
+/// Creates an SPL token transfer instruction
+pub async fn send_token_handler(
+    JsonExtractor(request): JsonExtractor<SendTokenRequest>,
+) -> Result<Json<ApiResponse<SendTokenResponse>>> {
+    info!("Handling token transfer request for mint: {}", request.mint);
+
+    // Validate request
+    if request.destination.is_empty() {
+        return Err(AppError::ValidationError("destination is required".to_string()));
+    }
+    if request.mint.is_empty() {
+        return Err(AppError::ValidationError("mint is required".to_string()));
+    }
+    if request.owner.is_empty() {
+        return Err(AppError::ValidationError("owner is required".to_string()));
+    }
+    if request.amount == 0 {
+        return Err(AppError::ValidationError("amount must be greater than 0".to_string()));
+    }
+
+    let solana_service = SolanaService::new();
+
+    // Validate public keys
+    if !solana_service.is_valid_pubkey(&request.destination) {
+        return Err(AppError::InvalidPublicKey(format!("Invalid destination: {}", request.destination)));
+    }
+    if !solana_service.is_valid_pubkey(&request.mint) {
+        return Err(AppError::InvalidPublicKey(format!("Invalid mint: {}", request.mint)));
+    }
+    if !solana_service.is_valid_pubkey(&request.owner) {
+        return Err(AppError::InvalidPublicKey(format!("Invalid owner: {}", request.owner)));
+    }
+
+    match solana_service.send_token(
+        &request.destination,
+        &request.mint,
+        &request.owner,
+        request.amount,
+    ) {
+        Ok(token_response) => {
+            info!("Successfully created token transfer instruction");
+            Ok(Json(ApiResponse::success(token_response)))
+        }
+        Err(e) => {
+            error!("Failed to create token transfer instruction: {}", e);
+            Err(e)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{CreateTokenRequest, MintTokenRequest, SignMessageRequest, VerifyMessageRequest};
+    use crate::models::{CreateTokenRequest, MintTokenRequest, SignMessageRequest, VerifyMessageRequest, SendSolRequest, SendTokenRequest};
 
     #[tokio::test]
     async fn test_generate_keypair_handler() {
@@ -216,8 +352,8 @@ mod tests {
         
         let response = result.unwrap();
         assert!(response.0.success);
-        assert!(!response.0.data.public_key.is_empty());
-        assert!(!response.0.data.secret_key.is_empty());
+        assert!(!response.0.data.pubkey.is_empty());
+        assert!(!response.0.data.secret.is_empty());
     }
 
     #[tokio::test]
@@ -228,7 +364,7 @@ mod tests {
             decimals: 9,
         };
         
-        let result = create_token_handler(ExtractJson(invalid_request)).await;
+        let result = create_token_handler(JsonExtractor(invalid_request)).await;
         assert!(result.is_err());
     }
 
@@ -241,7 +377,7 @@ mod tests {
             amount: 0,
         };
         
-        let result = mint_token_handler(ExtractJson(invalid_request)).await;
+        let result = mint_token_handler(JsonExtractor(invalid_request)).await;
         assert!(result.is_err());
     }
 
@@ -252,7 +388,7 @@ mod tests {
             secret: "".to_string(),
         };
         
-        let result = sign_message_handler(ExtractJson(invalid_request)).await;
+        let result = sign_message_handler(JsonExtractor(invalid_request)).await;
         assert!(result.is_err());
     }
 
@@ -261,10 +397,35 @@ mod tests {
         let invalid_request = VerifyMessageRequest {
             message: "".to_string(),
             signature: "".to_string(),
-            public_key: "".to_string(),
+            pubkey: "".to_string(),
         };
         
-        let result = verify_message_handler(ExtractJson(invalid_request)).await;
+        let result = verify_message_handler(JsonExtractor(invalid_request)).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_send_sol_handler_validation() {
+        let invalid_request = SendSolRequest {
+            from: "".to_string(),
+            to: "".to_string(),
+            lamports: 0,
+        };
+        
+        let result = send_sol_handler(JsonExtractor(invalid_request)).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_send_token_handler_validation() {
+        let invalid_request = SendTokenRequest {
+            destination: "".to_string(),
+            mint: "".to_string(),
+            owner: "".to_string(),
+            amount: 0,
+        };
+        
+        let result = send_token_handler(JsonExtractor(invalid_request)).await;
         assert!(result.is_err());
     }
 } 

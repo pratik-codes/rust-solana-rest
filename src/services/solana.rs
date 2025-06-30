@@ -4,9 +4,10 @@ use solana_sdk::{
     pubkey::Pubkey,
     signature::{Keypair, Signer, Signature},
     instruction::Instruction,
+    system_instruction,
 };
 use spl_token::{
-    instruction::{initialize_mint, mint_to},
+    instruction::{initialize_mint, mint_to, transfer},
 };
 use bs58;
 use base64::{Engine as _, engine::general_purpose};
@@ -17,7 +18,10 @@ use crate::models::{
     TokenInstructionResponse, 
     AccountMeta, 
     SignMessageResponse, 
-    VerifyMessageResponse
+    VerifyMessageResponse,
+    SendSolResponse,
+    SendTokenResponse,
+    SendTokenAccountMeta,
 };
 use crate::errors::{AppError, Result, base58_decode_error, base64_decode_error};
 
@@ -34,12 +38,12 @@ impl SolanaService {
     pub fn generate_keypair(&self) -> Result<KeypairResponse> {
         let keypair = Keypair::new();
         
-        let public_key = keypair.pubkey().to_string();
-        let secret_key = bs58::encode(&keypair.to_bytes()).into_string();
+        let pubkey = keypair.pubkey().to_string();
+        let secret = bs58::encode(&keypair.to_bytes()).into_string();
 
         Ok(KeypairResponse {
-            public_key,
-            secret_key,
+            pubkey,
+            secret,
         })
     }
 
@@ -134,7 +138,7 @@ impl SolanaService {
         &self,
         message: &str,
         signature_base64: &str,
-        public_key: &str,
+        pubkey: &str,
     ) -> Result<VerifyMessageResponse> {
         // Decode signature from base64
         let signature_bytes = general_purpose::STANDARD
@@ -142,8 +146,8 @@ impl SolanaService {
             .map_err(base64_decode_error)?;
 
         // Parse public key
-        let pubkey = Pubkey::from_str(public_key)
-            .map_err(|_| AppError::InvalidPublicKey(public_key.to_string()))?;
+        let pubkey_parsed = Pubkey::from_str(pubkey)
+            .map_err(|_| AppError::InvalidPublicKey(pubkey.to_string()))?;
 
         // Create signature from bytes
         let signature = Signature::try_from(signature_bytes.as_slice())
@@ -151,9 +155,97 @@ impl SolanaService {
 
         // Verify using ed25519-dalek for compatibility
         let message_bytes = message.as_bytes();
-        let valid = self.verify_ed25519_signature(&pubkey, message_bytes, &signature)?;
+        let valid = self.verify_ed25519_signature(&pubkey_parsed, message_bytes, &signature)?;
 
-        Ok(VerifyMessageResponse { valid })
+        Ok(VerifyMessageResponse {
+            valid,
+            message: message.to_string(),
+            pubkey: pubkey.to_string(),
+        })
+    }
+
+    /// Creates a SOL transfer instruction
+    pub fn send_sol(
+        &self,
+        from: &str,
+        to: &str,
+        lamports: u64,
+    ) -> Result<SendSolResponse> {
+        // Parse public keys
+        let from_pubkey = Pubkey::from_str(from)
+            .map_err(|_| AppError::InvalidPublicKey(from.to_string()))?;
+        
+        let to_pubkey = Pubkey::from_str(to)
+            .map_err(|_| AppError::InvalidPublicKey(to.to_string()))?;
+
+        // Validate that lamports is greater than 0
+        if lamports == 0 {
+            return Err(AppError::ValidationError("Amount must be greater than 0".to_string()));
+        }
+
+        // Create the transfer instruction
+        let instruction = system_instruction::transfer(&from_pubkey, &to_pubkey, lamports);
+
+        // Convert to simplified response format for SOL transfers
+        Ok(SendSolResponse {
+            program_id: instruction.program_id.to_string(),
+            accounts: vec![from.to_string(), to.to_string()],
+            instruction_data: general_purpose::STANDARD.encode(&instruction.data),
+        })
+    }
+
+    /// Creates an SPL token transfer instruction
+    pub fn send_token(
+        &self,
+        destination: &str,
+        mint: &str,
+        owner: &str,
+        amount: u64,
+    ) -> Result<SendTokenResponse> {
+        // Parse public keys
+        let destination_pubkey = Pubkey::from_str(destination)
+            .map_err(|_| AppError::InvalidPublicKey(destination.to_string()))?;
+        
+        let mint_pubkey = Pubkey::from_str(mint)
+            .map_err(|_| AppError::InvalidPublicKey(mint.to_string()))?;
+        
+        let owner_pubkey = Pubkey::from_str(owner)
+            .map_err(|_| AppError::InvalidPublicKey(owner.to_string()))?;
+
+        // Validate amount
+        if amount == 0 {
+            return Err(AppError::ValidationError("Amount must be greater than 0".to_string()));
+        }
+
+        // For token transfers, we need source and destination token accounts
+        // We'll use associated token account addresses (simplified)
+        let source_ata = spl_associated_token_account::get_associated_token_address(&owner_pubkey, &mint_pubkey);
+        let dest_ata = spl_associated_token_account::get_associated_token_address(&destination_pubkey, &mint_pubkey);
+
+        // Create the transfer instruction
+        let instruction = transfer(
+            &spl_token::id(),
+            &source_ata,
+            &dest_ata,
+            &owner_pubkey,
+            &[],
+            amount,
+        ).map_err(|e| AppError::TokenOperationFailed(e.to_string()))?;
+
+        // Convert accounts to the specific format for send token endpoint
+        let accounts: Vec<SendTokenAccountMeta> = instruction.accounts
+            .into_iter()
+            .map(|acc| SendTokenAccountMeta {
+                pubkey: acc.pubkey.to_string(),
+                is_signer: acc.is_signer,
+            })
+            .collect();
+
+        Ok(SendTokenResponse {
+            program_id: instruction.program_id.to_string(),
+            accounts,
+            instruction_data: general_purpose::STANDARD.encode(&instruction.data),
+        })
     }
 
     /// Helper function to convert Solana Instruction to our response format
@@ -230,8 +322,8 @@ mod tests {
         
         assert!(result.is_ok());
         let keypair_response = result.unwrap();
-        assert!(!keypair_response.public_key.is_empty());
-        assert!(!keypair_response.secret_key.is_empty());
+        assert!(!keypair_response.pubkey.is_empty());
+        assert!(!keypair_response.secret.is_empty());
     }
 
     #[test]
@@ -243,12 +335,12 @@ mod tests {
         let message = "Hello, Solana!";
         
         // Sign the message
-        let sign_result = service.sign_message(message, &keypair_response.secret_key);
+        let sign_result = service.sign_message(message, &keypair_response.secret);
         assert!(sign_result.is_ok());
         
         let sign_response = sign_result.unwrap();
         assert_eq!(sign_response.message, message);
-        assert_eq!(sign_response.public_key, keypair_response.public_key);
+        assert_eq!(sign_response.public_key, keypair_response.pubkey);
         
         // Verify the signature
         let verify_result = service.verify_message(
@@ -257,7 +349,9 @@ mod tests {
             &sign_response.public_key
         );
         assert!(verify_result.is_ok());
-        assert!(verify_result.unwrap().valid);
+        let verify_response = verify_result.unwrap();
+        assert!(verify_response.valid);
+        assert_eq!(verify_response.message, message);
     }
 
     #[test]
@@ -271,7 +365,7 @@ mod tests {
         let verify_result = service.verify_message(
             "test message",
             &invalid_signature,
-            &keypair_response.public_key
+            &keypair_response.pubkey
         );
         
         // Should succeed but return valid: false
@@ -305,5 +399,33 @@ mod tests {
         assert_eq!(response.program_id, spl_token::id().to_string());
         assert!(!response.accounts.is_empty());
         assert!(!response.instruction_data.is_empty());
+    }
+
+    #[test]
+    fn test_send_sol_instruction() {
+        let service = SolanaService::new();
+        
+        let from = "11111111111111111111111111111112";
+        let to = "11111111111111111111111111111113";
+        let lamports = 1000000;
+        
+        let result = service.send_sol(from, to, lamports);
+        assert!(result.is_ok());
+        
+        let response = result.unwrap();
+        assert_eq!(response.program_id, solana_sdk::system_program::id().to_string());
+        assert_eq!(response.accounts.len(), 2);
+        assert!(!response.instruction_data.is_empty());
+    }
+
+    #[test]
+    fn test_send_sol_zero_amount() {
+        let service = SolanaService::new();
+        
+        let from = "11111111111111111111111111111112";
+        let to = "11111111111111111111111111111113";
+        
+        let result = service.send_sol(from, to, 0);
+        assert!(result.is_err());
     }
 } 
