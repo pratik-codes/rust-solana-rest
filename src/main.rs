@@ -7,8 +7,7 @@ mod router;
 mod handlers;
 mod services;
 mod models;
-mod errors;
-mod validation;
+mod utils;
 
 use router::create_router;
 
@@ -26,7 +25,7 @@ async fn main() {
     let app = create_router();
 
     // Define the server address
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
     info!("Starting Solana HTTP server on {}", addr);
 
     // Create a TCP listener

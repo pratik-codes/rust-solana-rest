@@ -1,9 +1,8 @@
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 use bs58;
-use base64::{Engine as _, engine::general_purpose};
 
-use crate::errors::{AppError, Result};
+use super::errors::{AppError, Result};
 
 /// Validates that a string is a valid base58-encoded Solana public key
 pub fn validate_pubkey(key: &str, field_name: &str) -> Result<Pubkey> {
@@ -14,22 +13,38 @@ pub fn validate_pubkey(key: &str, field_name: &str) -> Result<Pubkey> {
     // First check if it's valid base58
     let decoded = bs58::decode(key)
         .into_vec()
-        .map_err(|_| AppError::InvalidPublicKey(format!("Invalid {}: not valid base58", field_name)))?;
+        .map_err(|_| {
+            if field_name == "sender" {
+                AppError::ValidationError("Invalid sender public key".to_string())
+            } else {
+                AppError::InvalidPublicKey(format!("Invalid {}: not valid base58", field_name))
+            }
+        })?;
     
     // Solana public keys should be exactly 32 bytes
     if decoded.len() != 32 {
-        return Err(AppError::InvalidPublicKey(format!("Invalid {}: incorrect length", field_name)));
+        return Err(if field_name == "sender" {
+            AppError::ValidationError("Invalid sender public key".to_string())
+        } else {
+            AppError::InvalidPublicKey(format!("Invalid {}: incorrect length", field_name))
+        });
     }
     
     // Parse as Solana public key
     Pubkey::from_str(key)
-        .map_err(|_| AppError::InvalidPublicKey(format!("Invalid {}: {}", field_name, key)))
+        .map_err(|_| {
+            if field_name == "sender" {
+                AppError::ValidationError("Invalid sender public key".to_string())
+            } else {
+                AppError::InvalidPublicKey(format!("Invalid {}: {}", field_name, key))
+            }
+        })
 }
 
 /// Validates that an amount is positive (greater than 0)
 pub fn validate_positive_amount(amount: u64, field_name: &str) -> Result<u64> {
     if amount == 0 {
-        return Err(AppError::ValidationError(format!("{} must be greater than 0", field_name)));
+        return Err(AppError::ValidationError("Amount must be greater than 0".to_string()));
     }
     Ok(amount)
 }
@@ -59,15 +74,15 @@ pub fn validate_secret_key(secret_key: &str) -> Result<()> {
     Ok(())
 }
 
-/// Validates that a string is a valid base64-encoded signature
+/// Validates that a string is a valid base58-encoded signature
 pub fn validate_signature_format(signature: &str) -> Result<Vec<u8>> {
     if signature.is_empty() {
         return Err(AppError::ValidationError("signature is required".to_string()));
     }
     
-    let decoded = general_purpose::STANDARD
-        .decode(signature)
-        .map_err(|_| AppError::InvalidSignature("Invalid signature format: not valid base64".to_string()))?;
+    let decoded = bs58::decode(signature)
+        .into_vec()
+        .map_err(|_| AppError::InvalidSignature("Invalid signature format: not valid base58".to_string()))?;
     
     if decoded.len() != 64 {
         return Err(AppError::InvalidSignature("Invalid signature length: must be 64 bytes".to_string()));

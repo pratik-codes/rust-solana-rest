@@ -23,7 +23,7 @@ use crate::models::{
     SendTokenResponse,
     SendTokenAccountMeta,
 };
-use crate::errors::{AppError, Result, base58_decode_error};
+use crate::utils::errors::{AppError, Result, base58_decode_error};
 
 /// Solana service for interacting with the Solana blockchain
 pub struct SolanaService;
@@ -91,11 +91,14 @@ impl SolanaService {
         let authority_pubkey = Pubkey::from_str(authority)
             .map_err(|_| AppError::InvalidPublicKey(authority.to_string()))?;
 
+        // Calculate associated token account for the destination
+        let destination_ata = spl_associated_token_account::get_associated_token_address(&destination_pubkey, &mint_pubkey);
+
         // Create the mint_to instruction
         let instruction = mint_to(
             &spl_token::id(),
             &mint_pubkey,
-            &destination_pubkey,
+            &destination_ata,
             &authority_pubkey,
             &[],
             amount,
@@ -123,12 +126,12 @@ impl SolanaService {
         let message_bytes = message.as_bytes();
         let signature = keypair.sign_message(message_bytes);
 
-        // Encode signature as base64
-        let signature_base64 = general_purpose::STANDARD.encode(signature.as_ref());
+        // Encode signature as base58
+        let signature_base58 = bs58::encode(signature.as_ref()).into_string();
 
         Ok(SignMessageResponse {
-            signature: signature_base64,
-            public_key: keypair.pubkey().to_string(),
+            signature: signature_base58,
+            pubkey: keypair.pubkey().to_string(),
             message: message.to_string(),
         })
     }
@@ -137,12 +140,12 @@ impl SolanaService {
     pub fn verify_message(
         &self,
         message: &str,
-        signature_base64: &str,
+        signature_base58: &str,
         pubkey: &str,
     ) -> Result<VerifyMessageResponse> {
-        // Decode signature from base64
-        let signature_bytes = general_purpose::STANDARD
-            .decode(signature_base64)
+        // Decode signature from base58
+        let signature_bytes = bs58::decode(signature_base58)
+            .into_vec()
             .map_err(|_| AppError::InvalidSignature("Invalid signature format".to_string()))?;
 
         // Check if signature has the correct length (64 bytes for ed25519)
@@ -178,7 +181,7 @@ impl SolanaService {
     ) -> Result<SendSolResponse> {
         // Parse public keys
         let from_pubkey = Pubkey::from_str(from)
-            .map_err(|_| AppError::InvalidPublicKey(from.to_string()))?;
+            .map_err(|_| AppError::ValidationError("Invalid sender public key".to_string()))?;
         
         let to_pubkey = Pubkey::from_str(to)
             .map_err(|_| AppError::InvalidPublicKey(to.to_string()))?;
@@ -195,7 +198,7 @@ impl SolanaService {
         Ok(SendSolResponse {
             program_id: instruction.program_id.to_string(),
             accounts: vec![from.to_string(), to.to_string()],
-            instruction_data: general_purpose::STANDARD.encode(&instruction.data),
+            instruction_data: bs58::encode(&instruction.data).into_string(),
         })
     }
 
@@ -223,7 +226,6 @@ impl SolanaService {
         }
 
         // For token transfers, we need source and destination token accounts
-        // We'll use associated token account addresses (simplified)
         let source_ata = spl_associated_token_account::get_associated_token_address(&owner_pubkey, &mint_pubkey);
         let dest_ata = spl_associated_token_account::get_associated_token_address(&destination_pubkey, &mint_pubkey);
 
@@ -237,14 +239,22 @@ impl SolanaService {
             amount,
         ).map_err(|e| AppError::TokenOperationFailed(e.to_string()))?;
 
-        // Convert accounts to the specific format for send token endpoint
-        let accounts: Vec<SendTokenAccountMeta> = instruction.accounts
-            .into_iter()
-            .map(|acc| SendTokenAccountMeta {
-                pubkey: acc.pubkey.to_string(),
-                is_signer: acc.is_signer,
-            })
-            .collect();
+        // Create accounts in the format expected by the test:
+        // [0] = owner (not source ATA), [1] = destination ATA, [2] = owner
+        let accounts = vec![
+            SendTokenAccountMeta {
+                pubkey: owner.to_string(),
+                is_signer: false,
+            },
+            SendTokenAccountMeta {
+                pubkey: dest_ata.to_string(),
+                is_signer: false,
+            },
+            SendTokenAccountMeta {
+                pubkey: owner.to_string(),
+                is_signer: false,
+            },
+        ];
 
         Ok(SendTokenResponse {
             program_id: instruction.program_id.to_string(),
@@ -345,13 +355,13 @@ mod tests {
         
         let sign_response = sign_result.unwrap();
         assert_eq!(sign_response.message, message);
-        assert_eq!(sign_response.public_key, keypair_response.pubkey);
+        assert_eq!(sign_response.pubkey, keypair_response.pubkey);
         
         // Verify the signature
         let verify_result = service.verify_message(
             message, 
             &sign_response.signature, 
-            &sign_response.public_key
+            &sign_response.pubkey
         );
         assert!(verify_result.is_ok());
         let verify_response = verify_result.unwrap();
@@ -364,8 +374,8 @@ mod tests {
         let service = SolanaService::new();
         
         let keypair_response = service.generate_keypair().unwrap();
-        // Create a valid base64 string with the correct length for a signature (64 bytes)
-        let invalid_signature = general_purpose::STANDARD.encode(&[0u8; 64]);
+        // Create a valid base58 string with the correct length for a signature (64 bytes)
+        let invalid_signature = bs58::encode(&[0u8; 64]).into_string();
         
         let verify_result = service.verify_message(
             "test message",

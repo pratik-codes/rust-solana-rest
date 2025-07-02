@@ -24,8 +24,8 @@ use crate::models::{
     SendTokenResponse,
 };
 use crate::services::solana::SolanaService;
-use crate::errors::{AppError, Result};
-use crate::validation;
+use crate::utils::errors::{AppError, Result};
+use crate::utils::validation;
 
 /// Custom JSON extractor that handles deserialization errors properly
 pub struct JsonExtractor<T>(pub T);
@@ -212,8 +212,8 @@ pub async fn send_sol_handler(
     info!("Handling SOL transfer request from {} to {}", request.from, request.to);
 
     // Comprehensive validation using validation module
-    let from = validation::validate_pubkey(&request.from, "from")?;
-    let to = validation::validate_pubkey(&request.to, "to")?;
+    let from = validation::validate_pubkey(&request.from, "sender")?;
+    let to = validation::validate_pubkey(&request.to, "recipient")?;
     let lamports = validation::validate_positive_amount(request.lamports, "lamports")?;
 
     let solana_service = SolanaService::new();

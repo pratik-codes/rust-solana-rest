@@ -84,7 +84,7 @@ pub struct SignMessageRequest {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SignMessageResponse {
     pub signature: String,
-    pub public_key: String,
+    pub pubkey: String,
     pub message: String,
 }
 
